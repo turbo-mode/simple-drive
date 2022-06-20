@@ -2,16 +2,16 @@ import { Box, Button, Container, Flex, Text } from "@chakra-ui/react";
 import type { NextPage } from "next";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
+import { useUploadFile } from "hooks/api/files";
+
+const chunkSize = 1024 * 10; //its 10KB, increase the number measure in KB
 
 const Upload: NextPage = () => {
-  const uploadButtonRef = useRef<HTMLButtonElement>(null);
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    // upload files
-  }, []);
+  const controller = useRef<AbortController | null>(null);
+  const { mutate: uploadFileChunk } = useUploadFile();
   const { getRootProps, getInputProps, isDragActive, acceptedFiles } =
-    useDropzone({
-      onDrop,
-    });
+    useDropzone();
+  const uploadButtonRef = useRef<HTMLButtonElement>(null);
   // state to tell which file is uploading
   const [currentFileIdx, setCurrentFileIdx] = useState<number | null>(null);
   // state to tell the last index of files that already uploaded to the server
@@ -21,18 +21,74 @@ const Upload: NextPage = () => {
   // state to tell what index from chunks is uploading to the server
   // since we send the data as octet-stream, the data will be sliced
   // as bytes[]
-  const [currentChuckIdx, setCurrentChunkIdx] = useState<number | null>(null);
+  const [currentChunkIdx, setCurrentChunkIdx] = useState<number | null>(null);
 
-  // listen the changes of accepted files
-  // here, we control the changes of current file index depending on last uploaded file index
-  useEffect(() => {
-    // no files accepted or still uploading some file
+  // start uploading after clicking the upload button
+  const beginToUpload = useCallback(() => {
     if (acceptedFiles.length <= 0 || currentFileIdx !== null) return;
 
     setCurrentFileIdx(
       lastUploadedFileIdx === null ? 0 : lastUploadedFileIdx + 1
     );
   }, [acceptedFiles, currentFileIdx, lastUploadedFileIdx]);
+
+  // read and upload file logic function
+  const readAndUploadCurrentChunk = useCallback(() => {
+    if (
+      acceptedFiles.length <= 0 ||
+      currentFileIdx === null ||
+      currentChunkIdx === null
+    )
+      return;
+
+    const reader = new FileReader();
+    const file = acceptedFiles[currentFileIdx];
+    // where the beginning of the chunk
+    const from = currentChunkIdx * chunkSize;
+    // the end part of the chunk
+    const to = from + chunkSize;
+    // convert the file as binary
+    const blob = file.slice(from, to);
+    // upload current chunk
+    reader.onload = (e) => {
+      const data = e.target?.result;
+
+      if (data === null || data === undefined) return;
+
+      controller.current = new AbortController();
+
+      uploadFileChunk(
+        {
+          data,
+          config: {
+            headers: {
+              "Content-Type": "application/octet-stream",
+            },
+            params: {
+              name: file.name,
+              totalChunks: Math.ceil(file.size / chunkSize),
+              currentChunkIdx,
+            },
+            signal: controller.current.signal,
+          },
+        },
+        {
+          onSuccess(res) {
+            console.log(res);
+          },
+        }
+      );
+    };
+    // read as data url
+    reader.readAsDataURL(blob);
+  }, [acceptedFiles, currentFileIdx, currentChunkIdx, uploadFileChunk]);
+
+  // cancel request with AbortController
+  useEffect(() => {
+    return () => {
+      controller.current?.abort();
+    };
+  }, []);
 
   // listen the changes of file that's uploading and reset
   // the chunk index everytime current file index changed.
@@ -46,6 +102,15 @@ const Upload: NextPage = () => {
 
     setCurrentChunkIdx(0);
   }, [currentFileIdx]);
+
+  // listen the changes of chunk index
+  // here, we send the data to the server everytime
+  // chunk index changed
+  useEffect(() => {
+    if (currentChunkIdx === null) return;
+
+    readAndUploadCurrentChunk();
+  }, [currentChunkIdx, readAndUploadCurrentChunk]);
 
   return (
     <Container maxW="container.xl" height="100vh">
@@ -90,7 +155,7 @@ const Upload: NextPage = () => {
                 fontWeight="semibold"
                 fontSize={{ base: "sm", sm: "mg" }}
               >
-                Transfer speed: 0 Kb/s
+                Transfer speed: 0 KB/s
               </Text>
               <Flex
                 width="full"
@@ -127,6 +192,7 @@ const Upload: NextPage = () => {
                     colorScheme="blue"
                     width="full"
                     maxWidth="240px"
+                    onClick={beginToUpload}
                   >
                     Upload
                   </Button>
